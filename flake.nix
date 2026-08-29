@@ -15,7 +15,7 @@
       packages = forAllSystems ({ pkgs }: {
         default = pkgs.rustPlatform.buildRustPackage {
           pname = "flatpak-helper";
-          version = "1.0.0";
+          version = "1.0.1";
           
           src = ./.;
           
