@@ -6,7 +6,7 @@ use crossterm::{
     terminal::{Clear, ClearType, disable_raw_mode, enable_raw_mode, size},
 };
 use serde::Deserialize;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::env;
 use std::io::{Write, stdout};
 use std::os::unix::process::CommandExt;
@@ -18,6 +18,8 @@ struct FlatpakItem {
     name: Option<String>,
     remotes: Option<String>,
     origin: Option<String>,
+    branch: Option<String>,
+    arch: Option<String>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -25,11 +27,25 @@ struct RemoteItem {
     name: Option<String>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Hash)]
-struct Match {
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct BranchInfo {
+    branch: String,
+    arch: String,
+    remote: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct AppGroup {
     app_id: String,
     name: String,
-    remote: String,
+    branches: Vec<BranchInfo>,
+}
+
+#[derive(Clone)]
+struct DisplayItem {
+    idx: usize,
+    col1: String,
+    col2: String,
 }
 
 fn get_remotes() -> HashSet<String> {
@@ -48,79 +64,88 @@ fn get_remotes() -> HashSet<String> {
     remotes
 }
 
-fn search_remote(keyword: &str) -> Vec<Match> {
-    let mut matches = Vec::new();
-    let mut seen = HashSet::new();
+fn search_remote(keyword: &str) -> Vec<AppGroup> {
+    let mut map: HashMap<String, AppGroup> = HashMap::new();
 
     if let Ok(output) = Command::new("flatpak")
-        .args(["search", keyword, "--columns=application,name,remotes"])
+        .args(["search", keyword, "--json"])
         .output()
     {
         if let Ok(text) = String::from_utf8(output.stdout) {
-            for line in text.lines() {
-                let parts: Vec<&str> = line.split('\t').collect();
-                if parts.len() >= 2 {
-                    let app_id = parts[0].trim().to_string();
-                    let name = parts[1].trim().to_string();
-                    let remote = if parts.len() >= 3 {
-                        parts[2].split(',').next().unwrap_or("").trim().to_string()
-                    } else {
-                        String::new()
-                    };
-                    if !app_id.is_empty() && seen.insert(app_id.clone()) {
-                        matches.push(Match {
-                            app_id,
-                            name,
-                            remote,
-                        });
-                    }
-                }
-            }
-        }
-    }
-    matches
-}
+            if let Ok(items) = serde_json::from_str::<Vec<FlatpakItem>>(&text) {
+                for item in items {
+                    if let (Some(app_id), Some(name)) = (item.application_id, item.name) {
+                        let remote = item
+                            .remotes
+                            .and_then(|r| r.split(',').next().map(|s| s.trim().to_string()))
+                            .unwrap_or_default();
+                        let branch = item.branch.unwrap_or_default();
+                        let arch = item.arch.unwrap_or_else(|| "x86_64".to_string());
 
-fn search_installed(keyword: &str) -> Vec<Match> {
-    let mut matches = Vec::new();
-    let mut seen = HashSet::new();
-    let keyword_lower = keyword.to_lowercase();
-
-    if let Ok(output) = Command::new("flatpak")
-        .args(["list", "--columns=application,name,origin"])
-        .output()
-    {
-        if let Ok(text) = String::from_utf8(output.stdout) {
-            for line in text.lines() {
-                let parts: Vec<&str> = line.split('\t').collect();
-                if parts.len() >= 2 {
-                    let app_id = parts[0].trim().to_string();
-                    let name = parts[1].trim().to_string();
-                    let remote = if parts.len() >= 3 {
-                        parts[2].trim().to_string()
-                    } else {
-                        String::new()
-                    };
-
-                    if app_id.to_lowercase().contains(&keyword_lower)
-                        || name.to_lowercase().contains(&keyword_lower)
-                    {
-                        if !app_id.is_empty() && seen.insert(app_id.clone()) {
-                            matches.push(Match {
-                                app_id,
+                        if !app_id.is_empty() {
+                            let entry = map.entry(app_id.clone()).or_insert_with(|| AppGroup {
+                                app_id: app_id.clone(),
                                 name,
-                                remote,
+                                branches: Vec::new(),
                             });
+                            let b_info = BranchInfo {
+                                branch,
+                                arch,
+                                remote,
+                            };
+                            if !entry.branches.contains(&b_info) {
+                                entry.branches.push(b_info);
+                            }
                         }
                     }
                 }
             }
         }
     }
-    matches
+    map.into_values().collect()
 }
 
-fn prompt_choice(matches: &[Match], keyword: &str) -> Option<Match> {
+fn search_installed(keyword: &str) -> Vec<AppGroup> {
+    let mut map: HashMap<String, AppGroup> = HashMap::new();
+    let keyword_lower = keyword.to_lowercase();
+
+    if let Ok(output) = Command::new("flatpak").args(["list", "--json"]).output() {
+        if let Ok(text) = String::from_utf8(output.stdout) {
+            if let Ok(items) = serde_json::from_str::<Vec<FlatpakItem>>(&text) {
+                for item in items {
+                    if let (Some(app_id), Some(name)) = (item.application_id, item.name) {
+                        let remote = item.origin.unwrap_or_default().trim().to_string();
+                        let branch = item.branch.unwrap_or_default();
+                        let arch = item.arch.unwrap_or_else(|| "x86_64".to_string());
+
+                        if app_id.to_lowercase().contains(&keyword_lower)
+                            || name.to_lowercase().contains(&keyword_lower)
+                        {
+                            if !app_id.is_empty() {
+                                let entry = map.entry(app_id.clone()).or_insert_with(|| AppGroup {
+                                    app_id: app_id.clone(),
+                                    name,
+                                    branches: Vec::new(),
+                                });
+                                let b_info = BranchInfo {
+                                    branch,
+                                    arch,
+                                    remote,
+                                };
+                                if !entry.branches.contains(&b_info) {
+                                    entry.branches.push(b_info);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    map.into_values().collect()
+}
+
+fn tui_select(items: &[DisplayItem], keyword: &str, title_prefix: &str) -> Option<usize> {
     let mut stdout = stdout();
     if enable_raw_mode().is_err() {
         return None;
@@ -142,14 +167,14 @@ fn prompt_choice(matches: &[Match], keyword: &str) -> Option<Match> {
             break;
         }
 
-        let filtered: Vec<&Match> = if search_query.is_empty() {
-            matches.iter().collect()
+        let filtered: Vec<&DisplayItem> = if search_query.is_empty() {
+            items.iter().collect()
         } else {
             let q = search_query.to_lowercase();
-            matches
+            items
                 .iter()
                 .filter(|m| {
-                    m.name.to_lowercase().contains(&q) || m.app_id.to_lowercase().contains(&q)
+                    m.col1.to_lowercase().contains(&q) || m.col2.to_lowercase().contains(&q)
                 })
                 .collect()
         };
@@ -164,20 +189,23 @@ fn prompt_choice(matches: &[Match], keyword: &str) -> Option<Match> {
             offset = current_row - max_visible + 1;
         }
 
-        let max_name_len = filtered
+        let max_col1_len = filtered
             .iter()
-            .map(|m| m.name.chars().count())
+            .map(|m| m.col1.chars().count())
             .max()
             .unwrap_or(0);
 
         let _ = queue!(stdout, Clear(ClearType::All));
 
         let header = if is_searching {
-            format!("Select '{}' (Search: {}_):", keyword, search_query)
+            format!(
+                "{} '{}' (Search: {}_):",
+                title_prefix, keyword, search_query
+            )
         } else if !search_query.is_empty() {
-            format!("Select '{}' (Search: {}):", keyword, search_query)
+            format!("{} '{}' (Search: {}):", title_prefix, keyword, search_query)
         } else {
-            format!("Select '{}' (/ to search):", keyword)
+            format!("{} '{}' (/ to search):", title_prefix, keyword)
         };
 
         let header_display = if header.chars().count() > cols as usize {
@@ -194,7 +222,7 @@ fn prompt_choice(matches: &[Match], keyword: &str) -> Option<Match> {
             SetAttribute(Attribute::Reset)
         );
 
-        let name_col_width = std::cmp::min(max_name_len, (cols as usize / 2).max(15));
+        let col1_width = std::cmp::min(max_col1_len, (cols as usize / 2).max(15));
 
         for idx in 0..max_visible {
             let actual_idx = offset + idx;
@@ -204,22 +232,22 @@ fn prompt_choice(matches: &[Match], keyword: &str) -> Option<Match> {
 
             let m = &filtered[actual_idx];
 
-            let name_chars: Vec<char> = m.name.chars().collect();
-            let display_name = if name_chars.len() > name_col_width {
-                let mut t: String = name_chars
+            let col1_chars: Vec<char> = m.col1.chars().collect();
+            let display_col1 = if col1_chars.len() > col1_width {
+                let mut t: String = col1_chars
                     .into_iter()
-                    .take(name_col_width.saturating_sub(1))
+                    .take(col1_width.saturating_sub(1))
                     .collect();
                 t.push('…');
                 t
             } else {
-                m.name.clone()
+                m.col1.clone()
             };
 
-            let padding_len = name_col_width.saturating_sub(display_name.chars().count());
+            let padding_len = col1_width.saturating_sub(display_col1.chars().count());
             let padding = " ".repeat(padding_len);
 
-            let text = format!("{}{padding}  {}", display_name, m.app_id);
+            let text = format!("{}{padding}  {}", display_col1, m.col2);
 
             let display_text = if text.chars().count() > cols as usize {
                 text.chars().take(cols as usize).collect::<String>()
@@ -273,7 +301,7 @@ fn prompt_choice(matches: &[Match], keyword: &str) -> Option<Match> {
                         }
                         KeyCode::Enter => {
                             if !filtered.is_empty() {
-                                result = Some((*filtered[current_row]).clone());
+                                result = Some(filtered[current_row].idx);
                                 break;
                             }
                         }
@@ -335,7 +363,7 @@ fn prompt_choice(matches: &[Match], keyword: &str) -> Option<Match> {
                         }
                         KeyCode::Char('g') => {
                             if last_key_g {
-                                current_row = 0; // gg - в начало
+                                current_row = 0;
                                 last_key_g = false;
                             } else {
                                 last_key_g = true;
@@ -343,7 +371,7 @@ fn prompt_choice(matches: &[Match], keyword: &str) -> Option<Match> {
                         }
                         KeyCode::Enter => {
                             if !filtered.is_empty() {
-                                result = Some((*filtered[current_row]).clone());
+                                result = Some(filtered[current_row].idx);
                                 break;
                             }
                         }
@@ -375,8 +403,6 @@ fn main() {
 
     let cmd = &args[1];
 
-    // Commands that ACTUALLY need keyword resolution.
-    // Anything else (like build, remote-add, repair, etc.) is passed through as-is safely.
     let resolve_cmds = [
         "install",
         "uninstall",
@@ -405,35 +431,88 @@ fn main() {
         if arg.starts_with('-') || remotes.contains(arg) || arg.contains('.') {
             new_args.push(arg.clone());
         } else {
-            let matches = if cmd == "install" || cmd == "search" {
+            let mut groups = if cmd == "install" || cmd == "search" {
                 search_remote(arg)
             } else {
                 search_installed(arg)
             };
 
-            if matches.is_empty() {
+            if groups.is_empty() {
                 eprintln!("Error: No matches found for '{}'", arg);
                 exit(1);
             }
 
-            let selected_match = if matches.len() == 1 {
-                matches[0].clone()
+            groups.sort_by(|a, b| a.name.cmp(&b.name));
+
+            let selected_group = if groups.len() == 1 {
+                &groups[0]
             } else {
-                if let Some(m) = prompt_choice(&matches, arg) {
-                    m
+                let display_items: Vec<DisplayItem> = groups
+                    .iter()
+                    .enumerate()
+                    .map(|(i, g)| DisplayItem {
+                        idx: i,
+                        col1: g.name.clone(),
+                        col2: format!(
+                            "{} [{}]",
+                            g.app_id,
+                            if g.branches.len() > 1 {
+                                format!("{} branches", g.branches.len())
+                            } else {
+                                g.branches
+                                    .first()
+                                    .map(|b| b.branch.clone())
+                                    .unwrap_or_default()
+                            }
+                        ),
+                    })
+                    .collect();
+
+                let idx = tui_select(&display_items, arg, "Select app").unwrap_or_else(|| exit(1));
+                &groups[idx]
+            };
+
+            let selected_branch = if selected_group.branches.len() <= 1 {
+                selected_group.branches.first().cloned()
+            } else {
+                let mut branches = selected_group.branches.clone();
+                branches.sort_by(|a, b| a.branch.cmp(&b.branch));
+
+                let branch_items: Vec<DisplayItem> = branches
+                    .iter()
+                    .enumerate()
+                    .map(|(i, b)| DisplayItem {
+                        idx: i,
+                        col1: b.branch.clone(),
+                        col2: format!("{} ({})", b.arch, b.remote),
+                    })
+                    .collect();
+
+                let idx = tui_select(&branch_items, &selected_group.name, "Select branch")
+                    .unwrap_or_else(|| exit(1));
+                Some(branches[idx].clone())
+            };
+
+            let ref_str = if let Some(b) = selected_branch.as_ref() {
+                if b.arch.is_empty() || b.branch.is_empty() {
+                    selected_group.app_id.clone()
                 } else {
-                    exit(1);
+                    format!("{}/{}/{}", selected_group.app_id, b.arch, b.branch)
                 }
+            } else {
+                selected_group.app_id.clone()
             };
 
             if cmd == "search" {
                 new_args = vec!["remote-info".to_string()];
-                if !selected_match.remote.is_empty() {
-                    new_args.push(selected_match.remote.clone());
+                if let Some(b) = selected_branch.as_ref() {
+                    if !b.remote.is_empty() {
+                        new_args.push(b.remote.clone());
+                    }
                 }
-                new_args.push(selected_match.app_id.clone());
+                new_args.push(ref_str);
             } else {
-                new_args.push(selected_match.app_id.clone());
+                new_args.push(ref_str);
             }
         }
     }
