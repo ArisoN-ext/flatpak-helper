@@ -5,11 +5,25 @@ use crossterm::{
     style::{Attribute, Print, SetAttribute},
     terminal::{Clear, ClearType, disable_raw_mode, enable_raw_mode, size},
 };
+use serde::Deserialize;
 use std::collections::HashSet;
 use std::env;
 use std::io::{Write, stdout};
 use std::os::unix::process::CommandExt;
 use std::process::{Command, exit};
+
+#[derive(Deserialize, Debug)]
+struct FlatpakItem {
+    application_id: Option<String>,
+    name: Option<String>,
+    remotes: Option<String>,
+    origin: Option<String>,
+}
+
+#[derive(Deserialize, Debug)]
+struct RemoteItem {
+    name: Option<String>,
+}
 
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 struct Match {
@@ -20,13 +34,14 @@ struct Match {
 
 fn get_remotes() -> HashSet<String> {
     let mut remotes = HashSet::new();
-    if let Ok(output) = Command::new("flatpak")
-        .args(["remotes", "--columns=name"])
-        .output()
-    {
+    if let Ok(output) = Command::new("flatpak").args(["remotes", "--json"]).output() {
         if let Ok(text) = String::from_utf8(output.stdout) {
-            for line in text.lines() {
-                remotes.insert(line.trim().to_string());
+            if let Ok(items) = serde_json::from_str::<Vec<RemoteItem>>(&text) {
+                for item in items {
+                    if let Some(name) = item.name {
+                        remotes.insert(name.trim().to_string());
+                    }
+                }
             }
         }
     }
