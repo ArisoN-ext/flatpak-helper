@@ -73,6 +73,16 @@ Add the flake to your `flake.nix` inputs:
 }
 ```
 
+### Arch Linux (AUR)
+
+You can install `flatpak-helper` from the [Arch User Repository (AUR)](https://aur.archlinux.org/packages/flatpak-helper) (Thanks [ventureo](https://github.com/ventureoo)) using your favorite AUR helper, such as `yay` or `paru`:
+
+```bash
+yay -S flatpak-helper
+# or
+paru -S flatpak-helper
+```
+
 ## Usage Examples
 
 **Install an application (searches remotes):**
